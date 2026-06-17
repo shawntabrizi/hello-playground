@@ -4,12 +4,12 @@
 // — so we route through hostApi.navigateTo and the host's own browser handles
 // the URL (a `.dot` resolves natively; a `.dot.li` gateway URL resolves too).
 //
-// Ported from playground-app/src/builder/LinkPopup.tsx. Host detection uses
-// this app's canonical isInHost() (src/lib/host/detect.ts — the one place that
-// logic lives); only hostApi.navigateTo comes from @novasamatech/host-api-wrapper.
+// Host detection uses this app's canonical isInHost() (src/lib/host/detect.ts —
+// the one place that logic lives); navigateTo comes from the Product SDK's
+// host TruApi (getTruApi), which re-exports the host-api-wrapper navigateTo.
 
 import type { AnchorHTMLAttributes } from "react";
-import { hostApi } from "@novasamatech/host-api-wrapper";
+import { getTruApi } from "@parity/product-sdk-host";
 import { isInHost } from "./lib/host/detect.ts";
 
 /** In-host navigation. Hand the host the FULL `https://name.dot.li` URL (the
@@ -17,14 +17,26 @@ import { isInHost } from "./lib/host/detect.ts";
  *  failure the click was already preventDefault()ed, so fall back to a plain
  *  window.open rather than leave a dead tap. */
 function openInHost(url: string): void {
-    hostApi.navigateTo({ tag: "v1", value: url }).then((result) => {
-        if (result.isErr()) {
-            console.warn("[dotpages] hostApi.navigateTo failed", result.error);
-            // The click was preventDefault()ed, so an error would leave a dead
-            // tap — fall back to plain navigation.
+    getTruApi()
+        .then((truApi) => {
+            if (!truApi) {
+                // No host TruApi on this platform — fall back to plain nav.
+                window.open(url, "_blank", "noopener");
+                return;
+            }
+            return truApi.navigateTo({ tag: "v1", value: url }).then((result) => {
+                if (result.isErr()) {
+                    console.warn("[dotpages] navigateTo failed", result.error);
+                    // The click was preventDefault()ed, so an error would leave
+                    // a dead tap — fall back to plain navigation.
+                    window.open(url, "_blank", "noopener");
+                }
+            });
+        })
+        .catch((error) => {
+            console.warn("[dotpages] navigateTo failed", error);
             window.open(url, "_blank", "noopener");
-        }
-    });
+        });
 }
 
 /** The form of a link worth COPYING in the current environment. Inside a host,

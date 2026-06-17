@@ -7,19 +7,16 @@
 // so descriptor drift against the live runtime can't brick the read path. Only
 // `assetHub.tx.*` is typed.
 //
-// Bulletin stays a direct PAPI WS client for now (hosts don't follow Bulletin);
-// a later migration phase moves uploads to CloudStorageClient.
+// Bulletin uploads now go through @parity/product-sdk-cloud-storage
+// (see lib/bulletin/store.ts) — no direct Bulletin WS client lives here.
 
 import {
     getChainAPI,
     type ChainClient as SdkChainClient,
     type PresetChains,
 } from "@parity/product-sdk-chain-client";
-import { createClient, type TypedApi } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
-import { bulletin } from "@polkadot-api/descriptors";
 import { READ_DEADLINE_MS, withDeadline } from "../deadline.ts";
-import { BULLETIN_RPC, CHAIN } from "./constants.ts";
+import { CHAIN } from "./constants.ts";
 
 // Pin to the paseo preset so the typed Asset Hub api is concrete (System,
 // Revive, …) rather than a union across all four preset chains — the union
@@ -59,19 +56,4 @@ export function getAssetHubClient(): Promise<AssetHubHandle> {
  *  long-lived socket can wedge (e.g. after the webview is backgrounded). */
 export function resetAssetHubClient(): void {
     assetHubHandle = null;
-}
-
-// ── Bulletin: direct WS (a later phase migrates to CloudStorageClient) ─────
-type BulletinApi = TypedApi<typeof bulletin>;
-type Client = ReturnType<typeof createClient>;
-
-let bulletinClient: Client | null = null;
-let bulletinApi: BulletinApi | null = null;
-
-export function getBulletinClient(): { client: Client; api: BulletinApi } {
-    if (!bulletinClient) {
-        bulletinClient = createClient(getWsProvider(BULLETIN_RPC));
-        bulletinApi = bulletinClient.getTypedApi(bulletin);
-    }
-    return { client: bulletinClient, api: bulletinApi! };
 }

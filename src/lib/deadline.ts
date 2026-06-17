@@ -11,6 +11,18 @@
  *  Generous enough to cover a cold light-client / host-bridge warm-up. */
 export const READ_DEADLINE_MS = 45_000;
 
+/** Transaction submission to inclusion — the chain side, no human in the loop
+ *  once the signer has signed. Matches READ_DEADLINE_MS: a stalled Bulletin
+ *  node hangs rather than rejects, so the deadline is the only recovery. */
+export const SUBMIT_DEADLINE_MS = 45_000;
+
+/** Anything that prompts the user over the desktop↔phone host bridge — a
+ *  permission grant or a sign request the user approves on their phone. Long
+ *  enough to cover a genuine first-time approval (the host's own ~60s window
+ *  plus the grant landing on chain), short enough that a WEDGED bridge falls
+ *  through to a retryable error instead of hanging forever. */
+export const SIGN_DEADLINE_MS = 90_000;
+
 export class DeadlineError extends Error {
     constructor(label: string) {
         super(
