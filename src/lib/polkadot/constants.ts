@@ -34,6 +34,13 @@ if (!NETWORK) {
     );
 }
 
+// Product SDK environment — selects the SDK's built-in, runtime-matched
+// descriptors and endpoints via getChainAPI(CHAIN). dotpages targets Paseo
+// Asset Hub Next (the active "paseo-next-v2" network is the SDK's "paseo"
+// preset). A literal keeps the typed Asset Hub api concrete rather than a
+// 4-chain union; targeting summit later means flipping this to "summit".
+export const CHAIN = "paseo" as const;
+
 export const BULLETIN_RPC = NETWORK.bulletinRpc;
 export const BULLETIN_GATEWAY = `${NETWORK.ipfsGateway}/ipfs/`;
 

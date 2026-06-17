@@ -64,7 +64,7 @@ function chargedStorageDeposit(value: unknown): bigint {
  */
 export async function isAccountMapped(signerAddress: string): Promise<boolean> {
     if (mappedAccounts.has(signerAddress)) return true;
-    const { unsafeApi } = getAssetHubClient();
+    const { unsafeApi } = await getAssetHubClient();
     const test = await unsafeApi.apis.ReviveApi.call(
         signerAddress,
         ZERO_H160,
@@ -95,7 +95,7 @@ export async function ensureAccountMapped(
 ): Promise<void> {
     if (mappedAccounts.has(signerAddress)) return;
 
-    const { api } = getAssetHubClient();
+    const { api } = await getAssetHubClient();
 
     try {
         if (await isAccountMapped(signerAddress)) return;
@@ -132,7 +132,7 @@ export async function dryRunContractCall(
     // reflect the head gateways/resolvers see (the post-deploy contenthash poll).
     at: "best" | "finalized" = "best",
 ): Promise<DryRunResult> {
-    const { unsafeApi } = getAssetHubClient();
+    const { unsafeApi } = await getAssetHubClient();
 
     const dryRun = await unsafeApi.apis.ReviveApi.call(
         callerAddress,
@@ -247,7 +247,7 @@ export async function submitContractCall(
     storageDepositEstimate?: bigint,
     onStatus?: (status: DeployStatus) => void,
 ): Promise<{ blockHash: string; blockNumber: number }> {
-    const { api } = getAssetHubClient();
+    const { api } = await getAssetHubClient();
 
     const refTime = gasEstimate ? gasEstimate.refTime * GAS_MULTIPLIER : DEFAULT_REF_TIME;
     const proofSize = gasEstimate

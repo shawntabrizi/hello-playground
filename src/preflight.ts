@@ -253,7 +253,7 @@ export async function runPreflight(params: {
         // does NOT cover those (register dispatches Revive::TransferFailed
         // on an unfunded product account). So every source needs a balance;
         // only the wording differs.
-        const { api } = getAssetHubClient();
+        const { api } = await getAssetHubClient();
         const info = await api.query.System.Account.getValue(account.address);
         freeNative = info.data.free;
         if (freeNative === 0n) {
