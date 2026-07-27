@@ -1,63 +1,59 @@
-// Cached PAPI clients for Bulletin Chain and Asset Hub Next.
+// Chain clients for Asset Hub Next and Bulletin.
 //
-// Asset Hub routes through the host (`createPapiProvider` with WS fallback)
-// when running as a deployed app inside Polkadot Desktop/Mobile — the host
-// owns the chain follow there, so signing/permissions stay coordinated
-// (Rock-Paper-Scissors / t3rminal pattern). Dev/localhost bypasses straight
-// to WS: the host refuses to open a follow for unregistered domains even
-// though `host_feature_supported` reports true, so the provider would trap
-// without the fallback ever firing. Bulletin stays direct WS everywhere —
-// hosts don't follow Bulletin (yet).
+// Asset Hub goes through the Product SDK's getChainAPI(CHAIN): one client that
+// serves the host (Polkadot Desktop/Mobile) and standalone/extension alike,
+// with runtime-matched built-in descriptors. ReviveApi dry-runs run on the
+// UNSAFE api on purpose — unsafe calls bypass descriptor-compatibility checks,
+// so descriptor drift against the live runtime can't brick the read path. Only
+// `assetHub.tx.*` is typed.
+//
+// Bulletin uploads now go through @parity/product-sdk-cloud-storage
+// (see lib/bulletin/store.ts) — no direct Bulletin WS client lives here.
 
-import { createClient, type TypedApi } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
-import { createPapiProvider } from "@novasamatech/product-sdk";
-import { isInHost } from "../host/detect.ts";
-// Locally-generated descriptors via `papi add` against the live chains.
-// The pre-published `@parity/product-sdk-descriptors` package is too stale for
-// the v2 runtime — runtime-API entry hashes mismatch, producing
-// "Incompatible runtime entry RuntimeCall(ReviveApi_call)" at dry-run time.
-// Re-generate via `npx papi generate` whenever the chain's runtime upgrades.
-import { bulletin, pah } from "@polkadot-api/descriptors";
-import { ASSET_HUB_RPC, BULLETIN_RPC, NETWORK } from "./constants.ts";
+import {
+    getChainAPI,
+    type ChainClient as SdkChainClient,
+    type PresetChains,
+} from "@parity/product-sdk-chain-client";
+import { READ_DEADLINE_MS, withDeadline } from "../deadline.ts";
+import { CHAIN, type SupportedChain } from "./constants.ts";
 
-function assetHubProvider() {
-    const ws = getWsProvider(ASSET_HUB_RPC);
-    const genesis = NETWORK.assetHubGenesis;
-    const isDevHost =
-        typeof window !== "undefined" && /^localhost(:\d+)?$/.test(window.location.host);
-    if (!genesis || isDevHost || !isInHost()) return ws;
-    return createPapiProvider(genesis as `0x${string}`, ws);
+// Narrowed to the two presets this app can target (see SupportedChain in
+// constants.ts) rather than the SDK's full Environment union — polkadot and
+// kusama have no live Bulletin/Individuality chain, and including them would
+// widen field types across the typed api for no benefit.
+type ChainClient = SdkChainClient<PresetChains<SupportedChain>>;
+
+export interface AssetHubHandle {
+    api: ChainClient["assetHub"];
+    unsafeApi: ReturnType<ChainClient["raw"]["assetHub"]["getUnsafeApi"]>;
 }
 
-type BulletinApi = TypedApi<typeof bulletin>;
-type AssetHubApi = TypedApi<typeof pah>;
-type Client = ReturnType<typeof createClient>;
+let assetHubHandle: Promise<AssetHubHandle> | null = null;
 
-let bulletinClient: Client | null = null;
-let bulletinApi: BulletinApi | null = null;
-
-let assetHubClient: Client | null = null;
-let assetHubApi: AssetHubApi | null = null;
-let assetHubUnsafeApi: ReturnType<Client["getUnsafeApi"]> | null = null;
-
-export function getBulletinClient(): { client: Client; api: BulletinApi } {
-    if (!bulletinClient) {
-        bulletinClient = createClient(getWsProvider(BULLETIN_RPC));
-        bulletinApi = bulletinClient.getTypedApi(bulletin);
+// Memoized but SELF-HEALING: `??=` caches a promise, so a rejected/timed-out
+// connect would otherwise be cached as a permanently-rejected promise — every
+// later caller re-awaits the same failure. The .catch nulls the slot so the
+// next call genuinely reconnects, and withDeadline converts a HANGING connect
+// (the host transport's typical failure mode) into a rejection instead of a
+// forever-pending promise.
+export function getAssetHubClient(): Promise<AssetHubHandle> {
+    if (!assetHubHandle) {
+        assetHubHandle = withDeadline(getChainAPI(CHAIN), READ_DEADLINE_MS, "Asset Hub connection")
+            .then((client) => ({
+                api: client.assetHub,
+                unsafeApi: client.raw.assetHub.getUnsafeApi(),
+            }))
+            .catch((cause) => {
+                assetHubHandle = null;
+                throw cause;
+            });
     }
-    return { client: bulletinClient, api: bulletinApi! };
+    return assetHubHandle;
 }
 
-export function getAssetHubClient(): {
-    client: Client;
-    api: AssetHubApi;
-    unsafeApi: ReturnType<Client["getUnsafeApi"]>;
-} {
-    if (!assetHubClient) {
-        assetHubClient = createClient(assetHubProvider());
-        assetHubApi = assetHubClient.getTypedApi(pah);
-        assetHubUnsafeApi = assetHubClient.getUnsafeApi();
-    }
-    return { client: assetHubClient, api: assetHubApi!, unsafeApi: assetHubUnsafeApi! };
+/** Drop the memoized handle so the next getAssetHubClient() reconnects — a
+ *  long-lived socket can wedge (e.g. after the webview is backgrounded). */
+export function resetAssetHubClient(): void {
+    assetHubHandle = null;
 }

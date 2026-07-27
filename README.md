@@ -43,33 +43,39 @@ Open the printed localhost URL. For local development outside a host, tick **Use
    - Leave the `.dot name` blank for an auto-derived name, or type your own — the checklist validates it live.
    - Wait for the pre-flight checks. Red ✕ items block nothing — the button arms a "Deploy anyway?" confirm — but they tell you what will fail and how to fix it.
 4. Tap **Deploy**. A fresh name takes ~90 seconds (dominated by DotNS's mandatory 60s commit–reveal wait, during which your content uploads in parallel); updating a name you own takes a few seconds.
-5. Your site is live at `https://<name>.dot.li`, and the bytes are independently fetchable from the IPFS gateway by CID.
+5. Your site is live at `https://<name>.dev-dot.li`, and the bytes are independently fetchable from the IPFS gateway by CID.
 
-**Funding notes (paseo-next-v2):**
-- *Host accounts*: transaction fees are sponsored by the host, but the domain price (~0.1 PAS) and storage deposits come from the product account itself — send it PAS from the [Asset Hub faucet](https://faucet.polkadot.io/?parachain=1500) (the checklist links it).
-- *Extension///Bob accounts*: also need Bulletin storage authorization from the [self-serve faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet). Host accounts skip this — the host submits storage on their behalf.
+**Funding notes (devnet):**
+- *Host accounts*: transaction fees are sponsored by the host, but the domain price (~0.1 PAS) and storage deposits come from the product account itself — send it PAS from the [Asset Hub faucet](https://faucet.polkadot.io/?parachain=1000) (the checklist links it).
+- *Extension///Bob accounts*: also need Bulletin storage authorization from the [self-serve faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet), selecting the **Products Devnet** network. Host accounts skip this — the host submits storage on their behalf.
 
 ## Deploying the Builder Itself
 
-The app deploys with the [`playground` CLI](https://github.com/paritytech/dotdot-deployer) to `dotpages.dot`:
+The app deploys with [`pad`](https://www.npmjs.com/package/@polkadot-community-foundation/polkadot-app-deploy) (a devDependency, so `npm install` provides it) to the `.dot` name in `networks.json`:
 
 ```bash
-npm run build
-playground deploy --domain dotpages --no-build --buildDir dist --signer dev
+npm run deploy:dot
 ```
 
-`playground init` pairs the CLI with your phone the first time. Use `--signer phone` to sign with your own account — note the upload itself exceeds the mobile signing channel's message limit, so `dev` is the practical choice for the multi-megabyte bundle.
+That builds, then runs `pad ./dist <domain>.dot --env <active>` using `domain` and `active` from `networks.json` — so the app and its deploy target can never drift apart. Card metadata (name, description, icon) comes from `polkadot-app-deploy.config.ts`, which `pad` discovers automatically.
+
+Uploads go through the pre-authorized pool by default. Set `MNEMONIC` to sign with — and own the name under — your own account. Extra arguments pass through to `pad`:
+
+```bash
+npm run deploy:dot -- --publish
+```
 
 ## Configuration
 
 | What | Where | Notes |
 |------|-------|-------|
-| Target network | `networks.json` → `active` | Endpoints, contracts, faucets, and gateway per network (`paseo-next-v2`, `preview`) |
+| Target network | `networks.json` → `active` | Endpoints, contracts, faucets, and gateway per network (`devnet`) |
+| Deploy domain | `networks.json` → `domain` | The app's own `.dot` name; shared by the runtime config and `pad` |
 | Product identifier | `VITE_PRODUCT_ACCOUNT_ID` env var | Overrides the hostname-derived identifier the host scopes accounts to |
 | Chain descriptors | `npx papi generate` | Re-run when the target runtime upgrades |
 
 ## How It Works
 
-The editor holds your site as a small block model. Rendering it (`renderHtml`) produces a complete, self-contained HTML document — that string is simultaneously the live preview and the deploy artifact. Deploying stores those bytes on Bulletin Chain (host-mediated preimage or a signed `TransactionStorage.store`), then drives the DotNS registrar contracts on Asset Hub Next through pallet-revive to register your name and point its contenthash at the CID.
+The editor holds your site as a small block model. Rendering it (`renderHtml`) produces a complete, self-contained HTML document — that string is simultaneously the live preview and the deploy artifact. Deploying stores those bytes on Bulletin Chain (host-mediated preimage or a signed `TransactionStorage.store`), then drives the DotNS registrar contracts on Asset Hub through pallet-revive to register your name and point its contenthash at the CID.
 
 For the full picture — account sources, the commit–reveal pipeline, why the host signer works the way it does, chain semantics the hard way — see [ARCHITECTURE.md](ARCHITECTURE.md).

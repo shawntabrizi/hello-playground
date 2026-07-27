@@ -1,31 +1,30 @@
-// Host account flow — direct against @novasamatech/product-sdk, following
-// the Rock-Paper-Scissors / t3rminal reference pattern.
+// Host account flow via @parity/product-sdk-signer (SignerManager + HostProvider).
 //
-// We intentionally avoid @parity/product-sdk-signer here: its SignerManager
-// discovers accounts via getLegacyAccounts(), which current desktop/android
-// hosts REJECT — the app sat in "connecting…" forever on Polkadot Mobile.
-// createAccountsProvider().getProductAccount is the supported path, and its
-// "createTransaction" signerType routes through the host's
-// host_create_transaction RPC, bypassing the PJS adapter and its static
-// signed-extension whitelist — AH-Next's custom extensions (AsPgas,
-// AuthorizeValueTransfer, …) pass through to the host as raw bytes.
-// Requires Polkadot Desktop ≥ 0.3.10 / a current Mobile build.
+// This is the single home for the SignerManager. The host's product-account
+// signer routes through host_create_transaction (the HostProvider's
+// `getSigner()`), so AH-Next's custom signed extensions (AsPgas,
+// AuthorizeValueTransfer, …) pass through to the host as raw bytes — the same
+// "createTransaction" behaviour the previous novasama path relied on, now
+// supplied by the Product SDK.
+//
+// The public API (connectHostAccount / signInToHost / getHostState /
+// useHostState / HostState / HostStatus / HostAccount) is preserved so
+// account.ts and accountSession.ts are unchanged. The host status is derived
+// from the SignerManager's connect result + state.
 
 import { useSyncExternalStore } from "react";
 import {
-    createAccountsProvider,
-    type ProductAccount,
-} from "@novasamatech/product-sdk";
-import { RequestCredentialsErr } from "@novasamatech/host-api";
-import { AccountId, type PolkadotSigner } from "polkadot-api";
+    HostProvider,
+    HostUnavailableError,
+    SignerManager,
+    isHostError,
+    type SignerAccount,
+} from "@parity/product-sdk-signer";
+import type { PolkadotSigner } from "polkadot-api";
+import { SIGN_DEADLINE_MS, withDeadline } from "./lib/deadline.ts";
 
 const DEFAULT_PRODUCT_ACCOUNT_DOT_NS = "dotpages.dot";
 const PRODUCT_ACCOUNT_DERIVATION_INDEX = 0;
-// Silent host-account resolution must not hang the UI on "Connecting…". Some
-// hosts never answer getProductAccount for an identifier they can't resolve
-// (e.g. a localhost dev origin), leaving the promise pending forever. Cap it so
-// the widget falls back to an explicit "Sign in to Polkadot" CTA instead.
-const HOST_CONNECT_TIMEOUT_MS = 6000;
 
 function isLoopback(hostname: string): boolean {
     return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
@@ -35,9 +34,10 @@ export function getProductAccountIdentifier(): string {
     const configured = import.meta.env.VITE_PRODUCT_ACCOUNT_ID?.trim();
     if (configured) return configured;
 
+    if (typeof window === "undefined") return DEFAULT_PRODUCT_ACCOUNT_DOT_NS;
     const { hostname } = window.location;
     // A loopback dev origin (localhost:5173) is not a product the host can
-    // resolve — asking for it leaves getProductAccount hanging. Fall back to
+    // resolve — asking for it leaves the host derivation hanging. Fall back to
     // the canonical product so localhost-in-host can authenticate as dotpages.
     if (isLoopback(hostname)) return DEFAULT_PRODUCT_ACCOUNT_DOT_NS;
 
@@ -77,92 +77,106 @@ function setState(next: HostState) {
     for (const cb of listeners) cb();
 }
 
-const accountsProvider = createAccountsProvider();
-const accountIdCodec = AccountId();
+// The host derives a single product account for this dapp (no picker), so we
+// pin the HostProvider to the dotNS-derived product account. `requestName`
+// stays on (default) — dotpages surfaces the host wallet's primary username as
+// the display name; the SDK fetches it at connect.
+export const signerManager = new SignerManager({
+    dappName: "dotpages",
+    createProvider: (type) =>
+        type === "host"
+            ? new HostProvider({
+                  productAccount: {
+                      dotNsIdentifier: getProductAccountIdentifier(),
+                      derivationIndex: PRODUCT_ACCOUNT_DERIVATION_INDEX,
+                  },
+              })
+            : new HostProvider(),
+});
 
-function describeProviderError(error: unknown): string {
-    const e = error as { tag?: string; value?: { reason?: string } } | null;
-    return `${e?.tag ?? "Unknown"}: ${e?.value?.reason ?? String(error)}`;
+function accountToHostAccount(account: SignerAccount): HostAccount {
+    return {
+        address: account.address,
+        publicKey: account.publicKey,
+        displayName: account.name,
+        // The HostProvider signer IS a PAPI PolkadotSigner routed via
+        // host_create_transaction, so AH-Next's custom signed extensions pass
+        // through as raw bytes.
+        signer: account.getSigner(),
+    };
+}
+
+// Reflect SignerManager state into the dotpages HostState shape on every change.
+signerManager.subscribe(() => {
+    const s = signerManager.getState();
+    if (s.status === "connected" && s.selectedAccount) {
+        setState({
+            status: "ready",
+            account: accountToHostAccount(s.selectedAccount),
+            error: null,
+        });
+    } else if (s.status === "connecting") {
+        setState({ status: "connecting", account: null, error: state.error });
+    }
+    // "disconnected" is left to connectHostAccount's result mapping — a bare
+    // disconnect after a failed connect must keep the signed-out/error verdict.
+});
+
+// Map a SignerManager connect failure onto the dotpages host status. A missing
+// host ("not inside a Polkadot host") → error so the UI offers the
+// extension/dev fallback; anything else (host present but no session, user
+// rejected) → signed-out so the UI offers a retryable "Sign in" CTA.
+function statusForConnectError(error: unknown): HostStatus {
+    if (error instanceof HostUnavailableError) return "error";
+    if (error instanceof Error && isHostError(error as never)) {
+        // HostDisconnected / HostRejected — present but no usable session.
+        return "signed-out";
+    }
+    return "signed-out";
 }
 
 /**
  * Resolve the app-scoped product account from the host. Distinguishes
- * "host has no dotli session" (→ `signed-out`, fixable via signInToHost)
+ * "host has no session" (→ `signed-out`, fixable via signInToHost)
  * from "host unavailable / failed" (→ `error`).
  */
 export async function connectHostAccount(): Promise<HostState> {
     if (state.status === "connecting") return state;
     setState({ status: "connecting", account: null, error: null });
 
-    try {
-        const identifier = getProductAccountIdentifier();
-        const timeout = Symbol("timeout");
-        const result = await Promise.race([
-            accountsProvider.getProductAccount(identifier, PRODUCT_ACCOUNT_DERIVATION_INDEX),
-            new Promise<typeof timeout>((resolve) =>
-                setTimeout(() => resolve(timeout), HOST_CONNECT_TIMEOUT_MS),
-            ),
-        ]);
-        // No answer in time → treat as "no host session" so the UI offers a
-        // sign-in CTA (which the user can retry) rather than hanging.
-        if (result === timeout) {
-            setState({ status: "signed-out", account: null, error: null });
-            return state;
-        }
-        if (result.isErr()) {
-            if (result.error instanceof RequestCredentialsErr.NotConnected) {
-                setState({ status: "signed-out", account: null, error: null });
-                return state;
-            }
+    const result = await signerManager.connect();
+    if (result.ok) {
+        const account = signerManager.getState().selectedAccount;
+        if (account) {
             setState({
-                status: "error",
-                account: null,
-                error: describeProviderError(result.error),
+                status: "ready",
+                account: accountToHostAccount(account),
+                error: null,
             });
             return state;
         }
-
-        const { publicKey } = result.value;
-        const productAccount: ProductAccount = {
-            dotNsIdentifier: identifier,
-            derivationIndex: PRODUCT_ACCOUNT_DERIVATION_INDEX,
-            publicKey,
-        };
-        const signer = accountsProvider.getProductAccountSigner(
-            productAccount,
-            "createTransaction",
-        );
-        const address = accountIdCodec.dec(publicKey);
-
-        let displayName: string | null = null;
-        try {
-            const userId = await accountsProvider.getUserId();
-            if (userId.isOk()) {
-                displayName =
-                    (userId.value as { primaryUsername?: string }).primaryUsername ?? null;
-            }
-        } catch {
-            // optional nicety — address fallback is fine
-        }
-
-        setState({
-            status: "ready",
-            account: { address, publicKey, displayName, signer },
-            error: null,
-        });
-    } catch (cause) {
-        setState({
-            status: "error",
-            account: null,
-            error: cause instanceof Error ? cause.message : String(cause),
-        });
+        // connect() can resolve `ok` with no selected account (host returned
+        // accounts but none matched the dotNS-derived product account). Treat
+        // as signed-out so the UI offers a sign-in CTA.
+        setState({ status: "signed-out", account: null, error: null });
+        return state;
     }
+
+    const status = statusForConnectError(result.error);
+    setState({
+        status,
+        account: null,
+        error: status === "error" ? result.error.message : null,
+    });
     return state;
 }
 
-/** Open the host's sign-in UI, then re-resolve the product account. */
+/** Open the host's sign-in UI, then re-resolve the product account. The host
+ *  shows its own session dialog inside `connect()` when it has no session. */
 export async function signInToHost(): Promise<HostState> {
-    await accountsProvider.requestLogin("Sign in to deploy with dotpages");
+    // A fresh connect after the user asked to sign in: clear any prior verdict
+    // so the host gets a clean attempt (it surfaces its own login UI).
+    signerManager.disconnect();
     return connectHostAccount();
 }
 
@@ -180,4 +194,22 @@ export function useHostState(): HostState {
         },
         () => state,
     );
+}
+
+/**
+ * Make the host account ready to submit: connect (if needed) and surface the
+ * host's session dialog. Deadline-bound because the host bridge can WEDGE (the
+ * WebView frozen while the user approves on their phone) and never settle.
+ * Returns the host PolkadotSigner.
+ */
+export async function ensureSignerReady(): Promise<PolkadotSigner> {
+    const hostState = await withDeadline(
+        connectHostAccount(),
+        SIGN_DEADLINE_MS,
+        "Connecting your account",
+    );
+    if (hostState.status !== "ready" || !hostState.account) {
+        throw new Error(hostState.error ?? "No host account available");
+    }
+    return hostState.account.signer;
 }

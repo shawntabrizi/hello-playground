@@ -1,28 +1,33 @@
-// Bulletin storage, two routes:
+// Bulletin storage via @parity/product-sdk-cloud-storage, two routes:
 //
 // HOST (`viaHost`): the host submits the bytes as a preimage
-// (`preimageManager.submit` + RFC-0002 PreimageSubmit permission) — no
-// Bulletin RPC connection, no account authorization, no signing-channel
-// size negotiation. No block info comes back; the client-side CID is the
-// receipt (Rock-Paper-Scissors / t3rminal pattern).
+// (`getPreimageManager().submit` + RFC-0002 PreimageSubmit permission) — no
+// Bulletin RPC connection, no account authorization, no signing-channel size
+// negotiation. No block info comes back; the client-side CID is the receipt.
 //
-// DIRECT (extension///Bob): check authorization → TransactionStorage.store →
-// wait for inclusion. Authorization check is REQUIRED — unauthorized store
-// transactions fail silently on Bulletin Chain (no on-chain error event).
+// DIRECT (extension///Bob): CloudStorageClient.store signs an authorized
+// TransactionStorage.store and waits for inclusion. The authorization check is
+// a pre-flight nicety — unauthorized stores fail on Bulletin Chain.
 //
-// AuthorizationExtent semantics (v2 runtime, per the pallet's types.rs):
-// `transactions`/`bytes` count CONSUMPTION within the current window and
-// never gate; `*_allowance` are the caps set at grant time. What gates a
-// `store` call is a non-expired authorization existing at all — the soft
-// byte counters only feed transaction priority.
+// The client is owned here (not the chain-client singleton) because the builder
+// supports the dev/extension accounts too: a lazy signer resolves whatever
+// account the caller passes per store. Stores within one upload are sequential,
+// so the single signer slot is race-free in practice.
 
-import { preimageManager } from "@novasamatech/product-sdk";
-import { Enum, type PolkadotSigner } from "polkadot-api";
+import {
+    ChunkStatus,
+    CloudStorageClient,
+    TxStatus,
+    createLazySigner,
+    type ProgressEvent,
+} from "@parity/product-sdk-cloud-storage";
+import { getPreimageManager } from "@parity/product-sdk-host";
+import type { PolkadotSigner } from "polkadot-api";
 import { ensureHostPermission } from "../host/permissions.ts";
-import { getBulletinClient } from "../polkadot/clients.ts";
-import { BULLETIN_FAUCET_URL, BULLETIN_GATEWAY } from "../polkadot/constants.ts";
+import { READ_DEADLINE_MS, SUBMIT_DEADLINE_MS, withDeadline } from "../deadline.ts";
+import { BULLETIN_FAUCET_URL, BULLETIN_GATEWAY, CHAIN } from "../polkadot/constants.ts";
 import { computeCID } from "./cid.ts";
-import { submitAndWait, type DeployStatus } from "./submit-and-wait.ts";
+import type { DeployStatus } from "./submit-and-wait.ts";
 
 import { MAX_TX_BYTES } from "./limits.ts";
 
@@ -61,22 +66,74 @@ const NO_AUTH: AuthCheck = {
     transactionsAllowance: 0,
 };
 
+// The lazy signer resolves the account of the in-flight store. Only one account
+// is ever active at a time and stores within one upload are sequential, so a
+// single slot is race-free in practice.
+let currentSigner: PolkadotSigner | null = null;
+
+let clientPromise: Promise<CloudStorageClient> | null = null;
+function getBulletinClient(): Promise<CloudStorageClient> {
+    // Self-healing singleton: caches the create() PROMISE, so a rejected or
+    // timed-out create would otherwise be reused forever. Null the slot on
+    // failure so the next caller rebuilds (mirrors clients.ts getAssetHubClient).
+    if (!clientPromise) {
+        clientPromise = withDeadline(
+            CloudStorageClient.create({
+                environment: CHAIN,
+                signer: createLazySigner(
+                    () => currentSigner,
+                    "Bulletin store called with no active account signer",
+                ),
+            }),
+            READ_DEADLINE_MS,
+            "Bulletin client connection",
+        ).catch((cause) => {
+            clientPromise = null;
+            throw cause;
+        });
+    }
+    return clientPromise;
+}
+
+// Map the SDK's progress events onto the DeployStatus vocabulary the UI uses.
+function statusFor(event: ProgressEvent): DeployStatus | null {
+    switch (event.type) {
+        case TxStatus.Signed:
+            return "signing";
+        case TxStatus.Broadcasted:
+            return "broadcasting";
+        case TxStatus.InBlock:
+            return "in-block";
+        case TxStatus.Finalized:
+            return "finalized";
+        default:
+            return null; // chunk events handled separately
+    }
+}
+
 export async function checkBulletinAuthorization(address: string): Promise<AuthCheck> {
-    const { api } = getBulletinClient();
-    const [auth, now] = await Promise.all([
-        api.query.TransactionStorage.Authorizations.getValue(Enum("Account", address)),
-        api.query.System.Number.getValue(),
-    ]);
-    if (!auth) return NO_AUTH;
-    const expired = auth.expiration <= now;
+    const client = await getBulletinClient();
+    // checkAuthorization reports failure on the `err` channel rather than
+    // throwing. Rethrow so the caller's guard renders "couldn't check" — a
+    // failed LOOKUP is not the same as a confirmed absence of authorization,
+    // and collapsing it to NO_AUTH would show a false "not authorized".
+    const result = await client.checkAuthorization(address);
+    if (!result.ok) throw result.error;
+    const status = result.value;
+    if (!status.authorized && status.expiration === 0) return NO_AUTH;
+    // The SDK reports REMAINING quota (not allowance + used), so model the
+    // richer shape as "allowance = remaining, used = 0" — the consumers compute
+    // `bytesAllowance - bytesUsed` for the remaining budget, which stays exact.
+    // `expired` is inferred: an entry with a non-zero expiration block that the
+    // chain no longer treats as authorized has lapsed.
     return {
-        authorized: !expired,
-        expired,
-        expiresAt: auth.expiration,
-        bytesUsed: auth.extent.bytes + auth.extent.bytes_permanent,
-        bytesAllowance: auth.extent.bytes_allowance,
-        transactionsUsed: auth.extent.transactions,
-        transactionsAllowance: auth.extent.transactions_allowance,
+        authorized: status.authorized,
+        expired: !status.authorized && status.expiration > 0,
+        expiresAt: status.expiration > 0 ? status.expiration : null,
+        bytesUsed: 0n,
+        bytesAllowance: status.remainingBytes,
+        transactionsUsed: 0,
+        transactionsAllowance: status.remainingTransactions,
     };
 }
 
@@ -88,7 +145,7 @@ export async function storeBytes(params: {
     label?: string;
     /** Route through the host's preimage submission (host accounts). */
     viaHost?: boolean;
-    onStatus?: (status: DeployStatus) => void;
+    onStatus?: (status: DeployStatus | string) => void;
 }): Promise<StoreHTMLResult> {
     const { bytes, signer, signerAddress, displayName, label = "Content", viaHost, onStatus } =
         params;
@@ -105,15 +162,24 @@ export async function storeBytes(params: {
         // permission prompt ≈ signing, host submission ≈ broadcast.
         onStatus?.("signing");
         await ensureHostPermission("PreimageSubmit");
+        const manager = await getPreimageManager();
+        if (!manager) {
+            throw new Error(
+                "Host preimage API unavailable — cannot store via the host on this platform",
+            );
+        }
         const cid = computeCID(bytes);
         onStatus?.("broadcasting");
-        const key = await preimageManager.submit(bytes);
-        // The returned key is the preimage hash. When it's a comparable
-        // 32-byte hex, verify it matches our blake2b-256 digest — a mismatch
-        // means the host stored (or hashed) something other than what we
-        // sent, and the gateway URL we'd report would 404. Unrecognized key
-        // formats pass through: a host-side format change must not start
-        // failing every upload.
+        const key = await withDeadline(
+            manager.submit(bytes),
+            SUBMIT_DEADLINE_MS,
+            "Saving your site to Bulletin",
+        );
+        // The returned key is the preimage hash. When it's a comparable 32-byte
+        // hex, verify it matches our blake2b-256 digest — a mismatch means the
+        // host stored (or hashed) something other than what we sent, and the
+        // gateway URL we'd report would 404. Unrecognized key formats pass
+        // through: a host-side format change must not start failing every upload.
         const digestHex = `0x${Array.from(cid.multihash.digest, (b) =>
             b.toString(16).padStart(2, "0"),
         ).join("")}`;
@@ -143,22 +209,51 @@ export async function storeBytes(params: {
                   `Self-serve faucet:\n${BULLETIN_FAUCET_URL}`,
         );
     }
-    // No byte-budget throw here: the soft-side counters never gate a store
-    // call (per the pallet docs) — consumption past the allowance only
-    // degrades priority. The pre-flight checklist surfaces that as a warn.
+    // No byte-budget throw: the soft-side counters never gate a store call —
+    // consumption past the allowance only degrades priority.
 
-    const cid = computeCID(bytes).toString();
-    const { api } = getBulletinClient();
-    const tx = api.tx.TransactionStorage.store({ data: bytes });
-    const result = await submitAndWait(tx, signer, onStatus);
+    const client = await getBulletinClient();
+    currentSigner = signer;
+    try {
+        onStatus?.("signing");
+        // Deadline-bound: a stalled Bulletin node hangs rather than rejects,
+        // which would otherwise pin the spinner open forever. Retrying is safe —
+        // Bulletin dedupes by content.
+        const result = await withDeadline(
+            client
+                .store(bytes)
+                .withWaitFor("in_block")
+                .withCallback((event) => {
+                    if (event.type === ChunkStatus.ChunkStarted) {
+                        onStatus?.(`signing chunk ${event.index + 1}/${event.total}`);
+                        return;
+                    }
+                    const status = statusFor(event);
+                    if (status) onStatus?.(status);
+                })
+                .send(),
+            SUBMIT_DEADLINE_MS,
+            "The Bulletin store",
+        );
 
-    return {
-        cid,
-        blockNumber: result.blockNumber,
-        blockHash: result.blockHash,
-        ipfsUrl: `${BULLETIN_GATEWAY}${cid}`,
-        bytes: bytes.length,
-    };
+        // Use the RECEIPT's CID, never a locally computed one: for content above
+        // one chunk it's the DAG-PB manifest CID, which a raw-codec CID computed
+        // over the input bytes would not match.
+        if (!result.cid) {
+            throw new Error(
+                `${label} stored but the receipt carries no CID — cannot build a gateway URL`,
+            );
+        }
+        return {
+            cid: result.cid.toString(),
+            blockNumber: result.blockNumber ?? null,
+            blockHash: null,
+            ipfsUrl: `${BULLETIN_GATEWAY}${result.cid.toString()}`,
+            bytes: result.size,
+        };
+    } finally {
+        currentSigner = null;
+    }
 }
 
 export async function storeHTML(params: {
@@ -167,7 +262,7 @@ export async function storeHTML(params: {
     signerAddress: string;
     displayName: string;
     viaHost?: boolean;
-    onStatus?: (status: DeployStatus) => void;
+    onStatus?: (status: DeployStatus | string) => void;
 }): Promise<StoreHTMLResult> {
     return storeBytes({
         bytes: new TextEncoder().encode(params.html),
