@@ -14,7 +14,7 @@
             "dotHost": "dev-dot.li",
             "nativeToEthRatio": 100000000,
             "bulletinFaucetUrl": "https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet",
-            "pasFaucetUrl": "https://faucet.polkadot.io/?parachain=1000",
+            "pasFaucetUrl": "https://faucet.polkadot.io/paseo?parachain=1000",
             "contracts": {
                 "registry": "0x527b08a640b527a3dae0C4BE04D7344E430B6E50",
                 "registrar": "0x7f0dF075cc8B7FE7218E90fFC5a553450dB120F3",
