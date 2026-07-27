@@ -1651,9 +1651,16 @@ body {
 .account-menu {
     position: absolute;
     top: calc(100% + 8px);
-    right: 0;
+    /* Anchored to the trigger's LEFT edge. The menu is wider than the trigger,
+       so anchoring right made it grow leftwards — fine on desktop, but both
+       call sites (homepage header, deploy panel) sit near the left edge, so on
+       a phone it grew straight off the side of the screen and clipped the name
+       and address. Growing rightwards from the trigger keeps it on screen. */
+    left: 0;
     z-index: 50;
-    min-width: 264px;
+    /* Clamp on narrow screens so the menu can't overflow the other way. */
+    min-width: min(264px, 100%);
+    max-width: calc(100vw - 24px);
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1662,7 +1669,7 @@ body {
     border: 1px solid var(--chrome-border);
     border-radius: 14px;
     box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
-    transform-origin: top right;
+    transform-origin: top left;
     animation: account-menu-in 0.13s ease-out;
 }
 @keyframes account-menu-in {

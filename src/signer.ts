@@ -78,20 +78,35 @@ function setState(next: HostState) {
 }
 
 // The host derives a single product account for this dapp (no picker), so we
-// pin the HostProvider to the dotNS-derived product account. `requestName`
-// stays on (default) — dotpages surfaces the host wallet's primary username as
-// the display name; the SDK fetches it at connect.
+// pin the HostProvider to the dotNS-derived product account.
+//
+// Both of the SDK's connect-time host prompts are turned OFF. They default on,
+// and together they made merely OPENING dotpages throw two consent dialogs at
+// the user before they had done anything:
+//
+//   requestName — fetches the wallet's primary username for the account label,
+//   which trips a host identity-permission prompt. dotpages does not need the
+//   user's identity: account.ts already falls back to a truncated address, so
+//   the label degrades from "alice.01" to "5Fjz…J8pA" and nothing else changes.
+//
+//   requestChainSubmitPermission — grabs ChainSubmit right after connect, long
+//   before there is anything to submit. dotpages requests it itself at the top
+//   of the deploy handler (see ensureHostPermission in App.tsx), which is the
+//   documented "drives it manually" case: the prompt lands when the user taps
+//   Deploy and the reason for it is obvious.
 export const signerManager = new SignerManager({
     dappName: "dotpages",
     createProvider: (type) =>
         type === "host"
             ? new HostProvider({
+                  requestChainSubmitPermission: false,
                   productAccount: {
                       dotNsIdentifier: getProductAccountIdentifier(),
                       derivationIndex: PRODUCT_ACCOUNT_DERIVATION_INDEX,
+                      requestName: false,
                   },
               })
-            : new HostProvider(),
+            : new HostProvider({ requestChainSubmitPermission: false }),
 });
 
 function accountToHostAccount(account: SignerAccount): HostAccount {
