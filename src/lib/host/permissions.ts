@@ -18,14 +18,16 @@ const granted = new Set<PermissionTag>();
 export async function ensureHostPermission(tag: PermissionTag): Promise<void> {
     if (granted.has(tag)) return;
     try {
-        // requestPermission returns a plain boolean (throws on host error),
-        // unlike the novasama ResultAsync the previous version unwrapped.
-        const ok = await withDeadline(
+        // requestPermission reports on the `err` channel rather than throwing,
+        // so BOTH halves have to be checked: `result.ok` is only "the host
+        // answered", and `result.value` is the actual grant/deny. Testing the
+        // Result object for truthiness would cache every denial as a grant.
+        const result = await withDeadline(
             requestPermission({ tag, value: undefined }),
             SIGN_DEADLINE_MS,
             "Requesting host permission",
         );
-        if (ok) granted.add(tag);
+        if (result.ok && result.value) granted.add(tag);
     } catch {
         // Host without RFC-0002 (or a wedged bridge) — the operation itself
         // will prompt or fail loud.
