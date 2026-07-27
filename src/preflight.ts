@@ -23,6 +23,7 @@ import {
     NATIVE_TO_ETH_RATIO,
     PAS_FAUCET_URL,
 } from "./lib/polkadot/constants.ts";
+import { formatNative, getNativeUnit } from "./lib/polkadot/native.ts";
 
 export type CheckState = "ok" | "warn" | "fail";
 
@@ -60,19 +61,12 @@ export interface PreflightReport {
     priceNative: bigint | null;
 }
 
-// 12-decimals per the 2 PAS == 2_000_000_000_000 convention in contracts.ts.
-const PAS = 1_000_000_000_000n;
-// Rough headroom for fees + the two contract storage deposits. Deliberately
-// coarse — exact estimation needs per-tx query_info and isn't worth it.
-const FEE_MARGIN = 5n * PAS;
-
-export function formatPas(native: bigint): string {
-    const whole = native / PAS;
-    const frac = ((native % PAS) * 10_000n) / PAS;
-    return frac === 0n
-        ? `${whole} PAS`
-        : `${whole}.${frac.toString().padStart(4, "0").replace(/0+$/, "")} PAS`;
-}
+// Rough headroom for fees + the two contract storage deposits, in whole PAS.
+// Deliberately coarse — exact estimation needs per-tx query_info and isn't
+// worth it. Scaled by the chain's actual unit at use, NOT by a hardcoded one:
+// this was 5n * 10n**12n against a 10-decimal chain, i.e. a 500 PAS threshold
+// masquerading as 5.
+const FEE_MARGIN_PAS = 5n;
 
 /** Client-side label rules — same shape the chain-side PoP rules expect. */
 export function validateLabel(label: string): string | null {
@@ -120,6 +114,15 @@ export async function runPreflight(params: {
     account: ActiveAccount;
 }): Promise<PreflightReport> {
     const { html, label, account } = params;
+
+    // Every PAS figure below is scaled by the chain's own decimals. Started
+    // here (not awaited) so the local checks don't queue behind the chain read;
+    // each check awaits it only when it has a number to render.
+    const unitPromise = getNativeUnit();
+    // Observe it immediately: the checks below can each return before ever
+    // awaiting it (an invalid label short-circuits, a zero balance short
+    // -circuits), and an unobserved rejection surfaces as a console error.
+    unitPromise.catch(() => {});
 
     const bytes = new TextEncoder().encode(html);
     const cid = computeCID(bytes).toString();
@@ -216,7 +219,8 @@ export async function runPreflight(params: {
         }
         const quote = await quoteDomain(label, ownerEvm, account.address);
         if (quote.price !== null) priceNative = quote.price / NATIVE_TO_ETH_RATIO;
-        const priceText = priceNative !== null ? ` · price ${formatPas(priceNative)}` : "";
+        const priceText =
+            priceNative !== null ? ` · price ${formatNative(priceNative, await unitPromise)}` : "";
         // The message is a classification, present even on success
         // ("Available to all"). The actual verdict is the tier comparison:
         // the account can register iff userStatus >= status.
@@ -271,7 +275,7 @@ export async function runPreflight(params: {
             label: "Funds",
             state: "ok",
             detail: "Ready",
-            tech: `${formatPas(freeNative)} free on Asset Hub${account.source === "host" ? " (fees host-sponsored)" : ""}`,
+            tech: `${formatNative(freeNative, await unitPromise)} free on Asset Hub${account.source === "host" ? " (fees host-sponsored)" : ""}`,
             link: null,
         };
     };
@@ -300,16 +304,20 @@ export async function runPreflight(params: {
 
     // Cross-check once both sides are known: balance vs price + headroom
     // (deposits dominate the margin; host fee sponsorship doesn't change it
-    // much since fees are the smallest component).
+    // much since fees are the smallest component). A unit we couldn't read
+    // means we can't compare — leave the funds verdict as the balance read
+    // found it rather than inventing a threshold.
+    const unit = await unitPromise.catch(() => null);
     if (
         funds.state === "ok" &&
         priceNative !== null &&
         freeNative !== null &&
-        freeNative < priceNative + FEE_MARGIN
+        unit !== null &&
+        freeNative < priceNative + FEE_MARGIN_PAS * unit
     ) {
         funds.state = "warn";
         funds.detail = "You're close — top up to cover the registration fees.";
-        funds.tech = `${formatPas(freeNative)} free vs price ${formatPas(priceNative)} + ~${formatPas(FEE_MARGIN)} fees/deposits`;
+        funds.tech = `${formatNative(freeNative, unit)} free vs price ${formatNative(priceNative, unit)} + ~${formatNative(FEE_MARGIN_PAS * unit, unit)} fees/deposits`;
         funds.link = withAddress(PAS_FAUCET_URL, account.address);
     }
 

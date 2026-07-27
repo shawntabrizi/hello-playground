@@ -1725,6 +1725,27 @@ body {
     font-size: 11px;
 }
 .account-address-copy.is-done { color: var(--ok); }
+/* Balance row — same slab as the address, but read-only (no hover/pointer). */
+.account-balance {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 9px;
+    color: var(--chrome-text2);
+    font-size: 12px;
+}
+.account-balance-value {
+    flex-shrink: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--chrome-text);
+}
+/* A zero balance is the thing that blocks a deploy — flag it in the same amber
+   the pre-flight checklist uses for its warn state (.check-warn .check-icon). */
+.account-balance-value.is-empty { color: #fbbf24; }
 .account-menu-actions { display: flex; flex-direction: column; gap: 2px; }
 .account-menu-action {
     text-align: left;

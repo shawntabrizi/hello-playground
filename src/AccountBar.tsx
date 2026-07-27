@@ -10,6 +10,8 @@ import { useEffect, useRef, useState } from "react";
 import { truncateAddress } from "@parity/product-sdk-address";
 import { avatarColors, avatarInitial } from "./avatar.ts";
 import { copyText } from "./clipboard.ts";
+import { getAssetHubClient } from "./lib/polkadot/clients.ts";
+import { formatNative, getNativeUnit } from "./lib/polkadot/native.ts";
 import {
     connectExtension,
     disconnect,
@@ -110,6 +112,46 @@ function Avatar({
     );
 }
 
+type BalanceState =
+    | { status: "loading" }
+    | { status: "ready"; text: string; zero: boolean }
+    | { status: "error" };
+
+/** Free balance on Asset Hub for the open menu's account. Deploying spends real
+ *  balance — the .dot price and the pallet-revive storage deposits are not
+ *  covered by host fee sponsorship — so the account view has to show whether
+ *  there is any. Fetched only while the menu is open: it is a chain read, and
+ *  nothing outside the menu displays it. */
+function useNativeBalance(address: string | null, enabled: boolean): BalanceState {
+    const [state, setState] = useState<BalanceState>({ status: "loading" });
+    useEffect(() => {
+        if (!address || !enabled) return;
+        let cancelled = false;
+        setState({ status: "loading" });
+        (async () => {
+            try {
+                const [{ api }, unit] = await Promise.all([
+                    getAssetHubClient(),
+                    getNativeUnit(),
+                ]);
+                const info = await api.query.System.Account.getValue(address);
+                if (cancelled) return;
+                setState({
+                    status: "ready",
+                    text: formatNative(info.data.free, unit),
+                    zero: info.data.free === 0n,
+                });
+            } catch {
+                if (!cancelled) setState({ status: "error" });
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [address, enabled]);
+    return state;
+}
+
 export default function AccountBar() {
     const { activeAccount, source, resolving, hostSignedOut, hasExtension, usingDev, error } =
         useAccountSession();
@@ -154,6 +196,7 @@ export default function AccountBar() {
 
     const src = source ?? "none";
     const connecting = resolving && !activeAccount;
+    const balance = useNativeBalance(activeAccount?.address ?? null, open);
 
     return (
         <div className="account-bar" ref={ref}>
@@ -225,6 +268,21 @@ export default function AccountBar() {
                                     {copied ? "Copied" : "Copy"}
                                 </span>
                             </button>
+
+                            <div className="account-balance">
+                                <span className="account-balance-label">Balance</span>
+                                <span
+                                    className={`account-balance-value${
+                                        balance.status === "ready" && balance.zero ? " is-empty" : ""
+                                    }`}
+                                >
+                                    {balance.status === "ready"
+                                        ? balance.text
+                                        : balance.status === "error"
+                                          ? "Unavailable"
+                                          : "…"}
+                                </span>
+                            </div>
 
                             <div className="account-menu-actions">
                                 {hasExtension && source !== "extension" && (
