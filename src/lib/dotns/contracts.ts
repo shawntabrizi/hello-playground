@@ -7,10 +7,14 @@
 import { decodeAbiParameters } from "viem";
 import { Binary, type PolkadotSigner } from "polkadot-api";
 import { getAssetHubClient } from "../polkadot/clients.ts";
+import { getNativeUnit } from "../polkadot/native.ts";
 import { submitAndWait, type DeployStatus } from "../bulletin/submit-and-wait.ts";
 
 const MAX_WEIGHT = 18446744073709551615n;
-const MIN_STORAGE_DEPOSIT = 2_000_000_000_000n; // 2 PAS
+// Floor for the storage_deposit_limit, in whole PAS. Scaled by the chain's unit
+// at use — the literal it replaces (2_000_000_000_000) assumed 12 decimals on a
+// 10-decimal chain, so the "2 PAS" floor was really 200 PAS.
+const MIN_STORAGE_DEPOSIT_PAS = 2n;
 const ZERO_H160 = "0x0000000000000000000000000000000000000000";
 
 const GAS_MULTIPLIER = 4n;
@@ -254,10 +258,11 @@ export async function submitContractCall(
         ? gasEstimate.proofSize * GAS_MULTIPLIER
         : DEFAULT_PROOF_SIZE;
 
+    const minStorageDeposit = MIN_STORAGE_DEPOSIT_PAS * (await getNativeUnit());
     let storageDeposit = storageDepositEstimate
         ? storageDepositEstimate + storageDepositEstimate / 5n
-        : MIN_STORAGE_DEPOSIT;
-    if (storageDeposit < MIN_STORAGE_DEPOSIT) storageDeposit = MIN_STORAGE_DEPOSIT;
+        : minStorageDeposit;
+    if (storageDeposit < minStorageDeposit) storageDeposit = minStorageDeposit;
 
     const tx = api.tx.Revive.call({
         // Descriptor types `dest` as SizedHex<20> (branded plain string), not

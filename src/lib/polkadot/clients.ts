@@ -27,6 +27,8 @@ type ChainClient = SdkChainClient<PresetChains<SupportedChain>>;
 export interface AssetHubHandle {
     api: ChainClient["assetHub"];
     unsafeApi: ReturnType<ChainClient["raw"]["assetHub"]["getUnsafeApi"]>;
+    /** Raw PAPI client — for chain-spec reads (see native.ts). */
+    raw: ChainClient["raw"]["assetHub"];
 }
 
 let assetHubHandle: Promise<AssetHubHandle> | null = null;
@@ -43,6 +45,7 @@ export function getAssetHubClient(): Promise<AssetHubHandle> {
             .then((client) => ({
                 api: client.assetHub,
                 unsafeApi: client.raw.assetHub.getUnsafeApi(),
+                raw: client.raw.assetHub,
             }))
             .catch((cause) => {
                 assetHubHandle = null;
