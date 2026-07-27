@@ -113,7 +113,13 @@ function statusFor(event: ProgressEvent): DeployStatus | null {
 
 export async function checkBulletinAuthorization(address: string): Promise<AuthCheck> {
     const client = await getBulletinClient();
-    const status = await client.checkAuthorization(address);
+    // checkAuthorization reports failure on the `err` channel rather than
+    // throwing. Rethrow so the caller's guard renders "couldn't check" — a
+    // failed LOOKUP is not the same as a confirmed absence of authorization,
+    // and collapsing it to NO_AUTH would show a false "not authorized".
+    const result = await client.checkAuthorization(address);
+    if (!result.ok) throw result.error;
+    const status = result.value;
     if (!status.authorized && status.expiration === 0) return NO_AUTH;
     // The SDK reports REMAINING quota (not allowance + used), so model the
     // richer shape as "allowance = remaining, used = 0" — the consumers compute

@@ -8,9 +8,14 @@ import networksConfig from "../../../networks.json";
 export interface NetworkConfig {
     name: string;
     description: string;
+    /** Product SDK preset for the Asset Hub client (getChainAPI). See CHAIN. */
+    chain: string;
     bulletinRpc: string;
+    /** Reference only — the SDK preset named by `chain` carries the endpoint the
+     *  app actually dials. Kept so the entry documents which chain it describes
+     *  and can be cross-checked against the preset's descriptor. */
     assetHubRpc: string;
-    /** AH genesis hash — enables host-routed providers; WS fallback if absent. */
+    /** Reference only, as `assetHubRpc` — must match the `chain` preset's genesis. */
     assetHubGenesis?: string;
     ipfsGateway: string;
     dotHost: string;
@@ -34,19 +39,36 @@ if (!NETWORK) {
     );
 }
 
-// Product SDK environment — selects the SDK's built-in, runtime-matched
-// descriptors and endpoints via getChainAPI(CHAIN). dotpages targets Paseo
-// Asset Hub Next (the active "paseo-next-v2" network is the SDK's "paseo"
-// preset). A literal keeps the typed Asset Hub api concrete rather than a
-// 4-chain union; targeting summit later means flipping this to "summit".
-export const CHAIN = "paseo" as const;
+// Product SDK preset for getChainAPI(CHAIN) — this, NOT assetHubRpc, decides
+// which chain the app connects to. getChainAPI takes only an environment name;
+// it carries its own endpoints and descriptors and never reads networks.json.
+// So the preset and this entry's contract addresses MUST describe the same
+// chain — "paseo" is Paseo Next (Asset Hub 1500), "devnet" is the Products
+// Devnet (Asset Hub 1000), and they are different networks with different
+// contracts. Getting this wrong fails quietly: the app connects and loads, then
+// every contract read comes back empty because those addresses live elsewhere.
+//
+// Only presets the SDK actually ships can be targeted. The SDK's Environment is
+// polkadot | kusama | paseo | devnet; polkadot and kusama have no live Bulletin
+// or Individuality chain, leaving these two for products.
+const SUPPORTED_CHAINS = ["paseo", "devnet"] as const;
+export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
+
+function assertSupportedChain(chain: string): SupportedChain {
+    if (!(SUPPORTED_CHAINS as readonly string[]).includes(chain)) {
+        throw new Error(
+            `networks.json: active network "${networksConfig.active}" sets chain preset "${chain}", which the Product SDK has no preset for (expected one of ${SUPPORTED_CHAINS.join(", ")}). The app would connect to a different chain than its contract addresses live on.`,
+        );
+    }
+    return chain as SupportedChain;
+}
+
+export const CHAIN: SupportedChain = assertSupportedChain(NETWORK.chain);
 
 export const BULLETIN_RPC = NETWORK.bulletinRpc;
 export const BULLETIN_GATEWAY = `${NETWORK.ipfsGateway}/ipfs/`;
 
-export const ASSET_HUB_RPC = NETWORK.assetHubRpc;
-
-/** Host suffix where DotNS names resolve (e.g. `<name>.dot.li`). */
+/** Host suffix where DotNS names resolve (e.g. `<name>.dev-dot.li`). */
 export const DOT_HOST = NETWORK.dotHost;
 
 /** DotNS deployed contract addresses on the active network's Asset Hub. */

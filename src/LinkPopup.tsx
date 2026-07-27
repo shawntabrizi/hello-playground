@@ -5,11 +5,11 @@
 // the URL (a `.dot` resolves natively; a `.dot.li` gateway URL resolves too).
 //
 // Host detection uses this app's canonical isInHost() (src/lib/host/detect.ts —
-// the one place that logic lives); navigateTo comes from the Product SDK's
-// host TruApi (getTruApi), which re-exports the host-api-wrapper navigateTo.
+// the one place that logic lives); navigateTo is the Product SDK's top-level
+// wrapper, which calls truApi.system.navigateTo and unwraps the response.
 
 import type { AnchorHTMLAttributes } from "react";
-import { getTruApi } from "@parity/product-sdk-host";
+import { navigateTo } from "@parity/product-sdk-host";
 import { isInHost } from "./lib/host/detect.ts";
 
 /** In-host navigation. Hand the host the FULL `https://name.dot.li` URL (the
@@ -17,21 +17,14 @@ import { isInHost } from "./lib/host/detect.ts";
  *  failure the click was already preventDefault()ed, so fall back to a plain
  *  window.open rather than leave a dead tap. */
 function openInHost(url: string): void {
-    getTruApi()
-        .then((truApi) => {
-            if (!truApi) {
-                // No host TruApi on this platform — fall back to plain nav.
+    navigateTo(url)
+        .then((result) => {
+            if (!result.ok) {
+                console.warn("[dotpages] navigateTo failed", result.error);
+                // The click was preventDefault()ed, so an error would leave
+                // a dead tap — fall back to plain navigation.
                 window.open(url, "_blank", "noopener");
-                return;
             }
-            return truApi.navigateTo({ tag: "v1", value: url }).then((result) => {
-                if (result.isErr()) {
-                    console.warn("[dotpages] navigateTo failed", result.error);
-                    // The click was preventDefault()ed, so an error would leave
-                    // a dead tap — fall back to plain navigation.
-                    window.open(url, "_blank", "noopener");
-                }
-            });
         })
         .catch((error) => {
             console.warn("[dotpages] navigateTo failed", error);

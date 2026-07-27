@@ -16,13 +16,13 @@ import {
     type PresetChains,
 } from "@parity/product-sdk-chain-client";
 import { READ_DEADLINE_MS, withDeadline } from "../deadline.ts";
-import { CHAIN } from "./constants.ts";
+import { CHAIN, type SupportedChain } from "./constants.ts";
 
-// Pin to the paseo preset so the typed Asset Hub api is concrete (System,
-// Revive, …) rather than a union across all four preset chains — the union
-// widens field types (e.g. account balances to `bigint | null`). CHAIN is the
-// literal "paseo", so getChainAPI(CHAIN) returns exactly this client shape.
-type ChainClient = SdkChainClient<PresetChains<"paseo">>;
+// Narrowed to the two presets this app can target (see SupportedChain in
+// constants.ts) rather than the SDK's full Environment union — polkadot and
+// kusama have no live Bulletin/Individuality chain, and including them would
+// widen field types across the typed api for no benefit.
+type ChainClient = SdkChainClient<PresetChains<SupportedChain>>;
 
 export interface AssetHubHandle {
     api: ChainClient["assetHub"];
